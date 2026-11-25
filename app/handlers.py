@@ -2,6 +2,7 @@ import asyncio
 import logging
 from pathlib import Path
 
+import yt_dlp
 from aiogram import F, Router
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
@@ -30,7 +31,7 @@ def build_router(settings: Settings, semaphore: asyncio.Semaphore) -> Router:
     @router.message(Command("help"))
     async def help_command(message: Message) -> None:
         await message.answer(
-            "Video havolasini yuboring. Qo‘llab-quvvatlanadi: Instagram, YouTube va sozlangan Zikra havolalari."
+            "Video havolasini yuboring. Qo‘llab-quvvatlanadi: Instagram, YouTube va Zikra Reels."
         )
 
     @router.message(F.text)
@@ -67,6 +68,20 @@ def build_router(settings: Settings, semaphore: asyncio.Semaphore) -> Router:
             await status.edit_text("⏱ Yuklash vaqti tugadi. Boshqa havolani yoki keyinroq urinib ko‘ring.")
         except ValueError as exc:
             await status.edit_text(f"⚠️ {exc}")
+        except yt_dlp.utils.DownloadError as exc:
+            error_text = str(exc).lower()
+            log.warning("yt-dlp download failed: %s", exc)
+            if "sign in to confirm" in error_text or "not a bot" in error_text:
+                await status.edit_text(
+                    "⚠️ YouTube ushbu videoni serverdan yuklashni vaqtincha chekladi. "
+                    "Render'da YouTube cookies Secret File sozlang yoki keyinroq qayta urinib ko‘ring. "
+                    "Instagram va Zikra havolalari bundan mustaqil ishlaydi."
+                )
+            else:
+                await status.edit_text(
+                    "❌ Video manbasi yuklashga ruxsat bermadi yoki formatni topib bo‘lmadi. "
+                    "Boshqa ochiq havolani sinab ko‘ring."
+                )
         except Exception:
             log.exception("Video processing failed")
             await status.edit_text(
