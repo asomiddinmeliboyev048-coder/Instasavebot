@@ -1,0 +1,20 @@
+services:
+  - type: worker
+    name: instasavebot
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: MAX_FILE_SIZE_MB
+        value: "49"
+      - key: LOG_LEVEL
+        value: INFO
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: ZIKRA_STORAGE_BUCKET
+        sync: false
