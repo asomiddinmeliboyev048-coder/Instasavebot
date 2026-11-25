@@ -154,6 +154,35 @@ def build_router(
             log_buffer.clear()
         await message.answer("🧹 Log xotirasi tozalandi.")
 
+    @router.callback_query(F.data.startswith("archive:"))
+    async def archive_download(callback: CallbackQuery) -> None:
+        if not callback.message or not callback.from_user:
+            await callback.answer("Xabar topilmadi.", show_alert=True)
+            return
+        identifier = (callback.data or "").split(":", 1)[1]
+        if not identifier or len(identifier) > 120 or not identifier.replace("-", "").replace("_", "").isalnum():
+            await callback.answer("Noto‘g‘ri audio identifikatori.", show_alert=True)
+            return
+        await callback.answer("⏳ Bajarilmoqda…")
+        status = await callback.message.answer("📥 Internet Archive'dan audio olinmoqda…")
+        try:
+            from app.services.internet_archive import download_archive_audio
+            path, title, artist = await download_archive_audio(identifier, settings)
+            try:
+                await callback.message.answer_audio(
+                    FSInputFile(path), title=title[:64] if title else "Audio",
+                    performer=artist[:64] if artist else None,
+                    caption="📚 Manba: Internet Archive"
+                )
+            finally:
+                path.unlink(missing_ok=True)
+            await status.delete()
+        except LookupError as exc:
+            await status.edit_text(f"🔎 {escape(str(exc))}")
+        except Exception:
+            log.exception("archive_audio_download_failed user_id=%s identifier=%s", callback.from_user.id, identifier)
+            await status.edit_text("❌ Audio yuklab bo‘lmadi. Boshqa natijani tanlang.")
+
     @router.callback_query(F.data.in_({"media:music", "media:note"}))
     async def media_action(callback: CallbackQuery) -> None:
         if not callback.message or not callback.from_user:
@@ -181,7 +210,21 @@ def build_router(
                 track_url = result.get("url")
                 if track_url:
                     lines.append(f'🎧 <a href="{escape(str(track_url), quote=True)}">Shazam’da ochish</a>')
-                await status.edit_text("\n".join(lines), disable_web_page_preview=True)
+                from app.services.internet_archive import search_archive_audio
+                archive_results = await search_archive_audio(result.get("title") or "", result.get("artist") or "")
+                if archive_results:
+                    lines.append("")
+                    lines.append("📚 <b>Internet Archive'dagi ochiq litsenziyali nusxalar:</b>")
+                    await status.edit_text("\n".join(lines), disable_web_page_preview=True)
+                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(text=f"📥 {item['title'][:35]}", callback_data=f"archive:{item['identifier']}")]
+                        for item in archive_results[:5]
+                    ])
+                    await callback.message.answer("Yuklab olish uchun audio nusxasini tanlang:", reply_markup=keyboard)
+                else:
+                    lines.append("")
+                    lines.append("📭 Internet Archive'da mos, ochiq litsenziyali audio topilmadi.")
+                    await status.edit_text("\n".join(lines), disable_web_page_preview=True)
                 log.info("music_identified user_id=%s title=%s", callback.from_user.id, result.get("title"))
             except LookupError as exc:
                 await status.edit_text(f"🔎 {escape(str(exc))}")
