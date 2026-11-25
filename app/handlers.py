@@ -6,7 +6,6 @@ from pathlib import Path
 
 import yt_dlp
 from aiogram import F, Router
-from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -24,32 +23,74 @@ from app.services.zikra import resolve_zikra_video
 
 log = logging.getLogger(__name__)
 MEDIA_TTL_SECONDS = 20 * 60
-# Cache the last successfully downloaded media per user/chat for quick follow-up actions.
-MEDIA_CACHE: dict[tuple[int, int], tuple[Path, float]] = {}
+# Source URLs are cached first; the actual media is downloaded only after a button is pressed.
+MEDIA_CACHE: dict[tuple[int, int], dict] = {}
+MEDIA_LOCKS: dict[tuple[int, int], asyncio.Lock] = {}
 
 
-def _media_keyboard() -> InlineKeyboardMarkup:
-    # Keep actions on separate rows so labels stay readable on narrow phones.
+def _source_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎵  Musiqani topish", callback_data="media:music")],
-        [InlineKeyboardButton(text="⭕  Yumaloq video qilish", callback_data="media:note")],
+        [InlineKeyboardButton(text="📥 Videoni yuklab olish", callback_data="media:video")],
+        [InlineKeyboardButton(text="🎵 Musiqani aniqlash", callback_data="media:music")],
+        [InlineKeyboardButton(text="⭕ Yumaloq video", callback_data="media:note")],
     ])
 
 
-def _cache_media(key: tuple[int, int], path: Path) -> None:
+def _archive_keyboard(items: list[dict]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=f"📥 {item['title'][:35]}",
+            callback_data=f"archive:{item['identifier']}",
+        )]
+        for item in items[:5]
+    ])
+
+
+def _cache_source(key: tuple[int, int], url: str, source: str) -> None:
     previous = MEDIA_CACHE.get(key)
-    if previous and previous[0] != path:
-        previous[0].unlink(missing_ok=True)
-    MEDIA_CACHE[key] = (path, time.monotonic() + MEDIA_TTL_SECONDS)
+    if previous and previous.get("path"):
+        previous["path"].unlink(missing_ok=True)
+    MEDIA_CACHE[key] = {
+        "url": url,
+        "source": source,
+        "path": None,
+        "expires": time.monotonic() + MEDIA_TTL_SECONDS,
+    }
 
     async def expire() -> None:
         await asyncio.sleep(MEDIA_TTL_SECONDS)
         current = MEDIA_CACHE.get(key)
-        if current and current[0] == path and current[1] <= time.monotonic():
+        if current and current["expires"] <= time.monotonic():
             MEDIA_CACHE.pop(key, None)
-            path.unlink(missing_ok=True)
+            path = current.get("path")
+            if path:
+                path.unlink(missing_ok=True)
 
     asyncio.create_task(expire())
+
+
+async def _get_cached_media(
+    key: tuple[int, int], settings: Settings, semaphore: asyncio.Semaphore
+) -> Path:
+    item = MEDIA_CACHE.get(key)
+    if not item or item["expires"] <= time.monotonic():
+        MEDIA_CACHE.pop(key, None)
+        raise LookupError("Havola muddati tugagan. Uni qayta yuboring.")
+    path = item.get("path")
+    if path and path.is_file():
+        return path
+
+    lock = MEDIA_LOCKS.setdefault(key, asyncio.Lock())
+    async with lock:
+        item = MEDIA_CACHE.get(key)
+        if not item or item["expires"] <= time.monotonic():
+            raise LookupError("Havola muddati tugagan. Uni qayta yuboring.")
+        path = item.get("path")
+        if path and path.is_file():
+            return path
+        path = await download_video(item["url"], settings, semaphore)
+        item["path"] = path
+        return path
 
 
 def build_router(
@@ -70,16 +111,16 @@ def build_router(
     async def start(message: Message) -> None:
         await message.answer(
             "Salom! 👋\n\n"
-            "Instagram yoki Zikra video havolasini yuboring. "
-            "Video tayyor bo‘lgach, musiqasini aniqlash yoki dumaloq video qilish mumkin.\n\n"
-            "Faqat foydalanishga haqli bo‘lgan videolaringizni yuboring."
+            "Instagram yoki Zikra video havolasini yuboring. Video avtomatik yuklanmaydi — "
+            "kerakli tugmani tanlang: video, musiqa yoki yumaloq video.\n\n"
+            "Musiqa nomi va ijrochisini yozib ham qidirishingiz mumkin."
         )
 
     @router.message(Command("help"))
     async def help_command(message: Message) -> None:
         await message.answer(
-            "Instagram yoki Zikra havolasini yuboring. "
-            "Video kelgach, 🎵 musiqani aniqlash yoki ⭕ dumaloq video tugmasini bosing."
+            "Instagram yoki Zikra havolasini yuboring va kerakli amalni tanlang. "
+            "Musiqa nomini yozib qidirsangiz ham bo‘ladi."
         )
 
     @router.message(Command("myid"))
@@ -140,10 +181,10 @@ def build_router(
         if not entries:
             await message.answer("Hozircha log yozuvlari yo‘q.")
             return
-        text = "📋 <b>Oxirgi loglar</b>\n<pre>" + escape("\n".join(entries)) + "</pre>"
-        if len(text) > 3900:
-            text = "📋 <b>Oxirgi loglar</b>\n<pre>" + escape("\n".join(entries[-12:])) + "</pre>"
-        await message.answer(text)
+        content = "📋 <b>Oxirgi loglar</b>\n<pre>" + escape("\n".join(entries)) + "</pre>"
+        if len(content) > 3900:
+            content = "📋 <b>Oxirgi loglar</b>\n<pre>" + escape("\n".join(entries[-12:])) + "</pre>"
+        await message.answer(content)
 
     @router.message(Command("clearlogs"))
     async def clear_logs_command(message: Message) -> None:
@@ -163,8 +204,8 @@ def build_router(
         if not identifier or len(identifier) > 120 or not identifier.replace("-", "").replace("_", "").isalnum():
             await callback.answer("Noto‘g‘ri audio identifikatori.", show_alert=True)
             return
-        await callback.answer("⏳ Bajarilmoqda…")
-        status = await callback.message.answer("📥 Internet Archive'dan audio olinmoqda…")
+        await callback.answer("Yuklanmoqda…")
+        status = await callback.message.answer("📥 Audio tayyorlanmoqda…")
         try:
             from app.services.internet_archive import download_archive_audio
             path, title, artist = await download_archive_audio(identifier, settings)
@@ -172,7 +213,7 @@ def build_router(
                 await callback.message.answer_audio(
                     FSInputFile(path), title=title[:64] if title else "Audio",
                     performer=artist[:64] if artist else None,
-                    caption="📚 Manba: Internet Archive"
+                    caption="📚 Manba: Internet Archive",
                 )
             finally:
                 path.unlink(missing_ok=True)
@@ -183,148 +224,123 @@ def build_router(
             log.exception("archive_audio_download_failed user_id=%s identifier=%s", callback.from_user.id, identifier)
             await status.edit_text("❌ Audio yuklab bo‘lmadi. Boshqa natijani tanlang.")
 
-    @router.callback_query(F.data.in_({"media:music", "media:note"}))
+    @router.callback_query(F.data.in_({"media:video", "media:music", "media:note"}))
     async def media_action(callback: CallbackQuery) -> None:
         if not callback.message or not callback.from_user:
             await callback.answer("Xabar topilmadi.", show_alert=True)
             return
         key = (callback.message.chat.id, callback.from_user.id)
-        cached = MEDIA_CACHE.get(key)
-        if not cached or not cached[0].is_file() or cached[1] <= time.monotonic():
-            MEDIA_CACHE.pop(key, None)
-            await callback.answer("Video muddati tugagan. Havolani qayta yuboring.", show_alert=True)
-            return
+        action = (callback.data or "").split(":", 1)[1]
+        await callback.answer("⏳ Tayyorlanmoqda…")
+        status = await callback.message.answer("📥 Kerakli media tayyorlanmoqda…")
+        source: Path | None = None
+        output: Path | None = None
+        started = time.monotonic()
+        try:
+            source = await _get_cached_media(key, settings, semaphore)
+            if action == "video":
+                await callback.message.answer_video(
+                    FSInputFile(source),
+                    caption="✅ Video tayyor!",
+                    supports_streaming=True,
+                )
+                await status.delete()
+                log.info("video_sent user_id=%s seconds=%.2f", callback.from_user.id, time.monotonic() - started)
+                return
 
-        source = cached[0]
-        await callback.answer("⏳ Bajarilmoqda…")
-        if callback.data == "media:music":
-            status = await callback.message.answer("🎵 Videodagi musiqa aniqlanmoqda…")
-            try:
+            if action == "music":
+                await status.edit_text("🎵 Videodagi musiqa aniqlanmoqda…")
                 result = await identify_music(source, settings)
                 title = escape(str(result.get("title") or "Noma’lum"))
                 artist = escape(str(result.get("artist") or "Noma’lum ijrochi"))
                 lines = [f"🎵 <b>{title}</b>", f"👤 {artist}"]
-                album = result.get("album")
-                if album:
-                    lines.append(f"💿 {escape(str(album))}")
-                track_url = result.get("url")
-                if track_url:
-                    lines.append(f'🎧 <a href="{escape(str(track_url), quote=True)}">Shazam’da ochish</a>')
+                if result.get("url"):
+                    lines.append(f'🎧 <a href="{escape(str(result["url"]), quote=True)}">Shazam’da ochish</a>')
                 from app.services.internet_archive import search_archive_audio
                 archive_results = await search_archive_audio(result.get("title") or "", result.get("artist") or "")
                 if archive_results:
-                    lines.append("")
-                    lines.append("📚 <b>Internet Archive'dagi ochiq litsenziyali nusxalar:</b>")
+                    lines.extend(["", "📚 <b>Ochiq litsenziyali audio nusxalar:</b>"])
                     await status.edit_text("\n".join(lines), disable_web_page_preview=True)
-                    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text=f"📥 {item['title'][:35]}", callback_data=f"archive:{item['identifier']}")]
-                        for item in archive_results[:5]
-                    ])
-                    await callback.message.answer("Yuklab olish uchun audio nusxasini tanlang:", reply_markup=keyboard)
+                    await callback.message.answer(
+                        "Yuklab olish uchun audio nusxasini tanlang:",
+                        reply_markup=_archive_keyboard(archive_results),
+                    )
                 else:
-                    lines.append("")
-                    lines.append("📭 Internet Archive'da mos, ochiq litsenziyali audio topilmadi.")
+                    lines.extend(["", "📭 Internet Archive'da mos ochiq litsenziyali audio topilmadi."])
                     await status.edit_text("\n".join(lines), disable_web_page_preview=True)
-                log.info("music_identified user_id=%s title=%s", callback.from_user.id, result.get("title"))
-            except LookupError as exc:
-                await status.edit_text(f"🔎 {escape(str(exc))}")
+                log.info("music_identified user_id=%s title=%s seconds=%.2f",
+                         callback.from_user.id, result.get("title"), time.monotonic() - started)
+                return
+
+            await status.edit_text("⭕ Yumaloq video tayyorlanmoqda…")
+            output = await make_video_note(source, settings)
+            await callback.message.answer_video_note(FSInputFile(output))
+            await status.delete()
+            log.info("video_note_sent user_id=%s seconds=%.2f bytes=%s",
+                     callback.from_user.id, time.monotonic() - started, output.stat().st_size)
+        except LookupError as exc:
+            await status.edit_text(f"🔎 {escape(str(exc))}")
+        except asyncio.TimeoutError:
+            log.exception("media_action_timeout user_id=%s action=%s", callback.from_user.id, action)
+            await status.edit_text("⏱ Jarayon vaqti tugadi. Qisqaroq video bilan urinib ko‘ring.")
+        except ValueError as exc:
+            await status.edit_text(f"⚠️ {escape(str(exc))}")
+        except yt_dlp.utils.DownloadError:
+            log.exception("instagram_download_error user_id=%s", callback.from_user.id)
+            await status.edit_text("❌ Instagram videoni bermadi yoki havola yopiq.")
+        except Exception:
+            log.exception("media_action_failed user_id=%s action=%s", callback.from_user.id, action)
+            await status.edit_text("❌ Amalni bajarishda xatolik. Admin /logs orqali sababini ko‘rishi mumkin.")
+        finally:
+            if output:
+                output.unlink(missing_ok=True)
+
+    @router.message(F.text)
+    async def handle_text(message: Message) -> None:
+        text = (message.text or "").strip()
+        url = extract_url(text)
+        if url:
+            user_id = message.from_user.id if message.from_user else 0
+            key = (message.chat.id, user_id)
+            status = await message.answer("🔎 Havola tekshirilmoqda…")
+            try:
+                source = classify_url(url, settings)
+                if source == "zikra":
+                    url = await resolve_zikra_video(url, settings)
+                _cache_source(key, url, source)
+                await status.edit_text(
+                    "✅ Havola tayyor! Endi faqat kerakli amalni tanlang:",
+                    reply_markup=_source_keyboard(),
+                )
+                log.info("link_ready source=%s user_id=%s", source, user_id)
             except ValueError as exc:
                 await status.edit_text(f"⚠️ {escape(str(exc))}")
             except Exception:
-                log.exception("music_identification_failed user_id=%s", callback.from_user.id)
-                await status.edit_text("❌ Musiqani aniqlashda xatolik. Keyinroq urinib ko‘ring.")
+                log.exception("link_validation_failed user_id=%s", user_id)
+                await status.edit_text("❌ Havolani tekshirishda xatolik yuz berdi.")
             return
 
-        status = await callback.message.answer(
-            "⭕ <b>Yumaloq video tayyorlanmoqda…</b>\n"
-            "🎞 Video 30 soniyagacha qisqartirilib, tezkor formatga o‘tkaziladi."
-        )
-        note_path: Path | None = None
-        started_at = time.monotonic()
+        # Plain text is treated as a music title/artist search.
+        query = text
+        if len(query) < 2:
+            await message.answer("Instagram/Zikra havolasini yoki musiqa nomi va ijrochisini yuboring.")
+            return
+        status = await message.answer(f"🔎 “{escape(query[:100])}” bo‘yicha musiqa qidirilmoqda…")
         try:
-            note_path = await make_video_note(source, settings)
-            log.info("video_note_encoded user_id=%s encoding_seconds=%.2f output_bytes=%s",
-                     callback.from_user.id, time.monotonic() - started_at, note_path.stat().st_size)
-            await status.edit_text("📤 Yumaloq video Telegram'ga yuborilmoqda…")
-            await callback.message.bot.send_chat_action(callback.message.chat.id, ChatAction.UPLOAD_VIDEO)
-            await asyncio.wait_for(callback.message.answer_video_note(FSInputFile(note_path)), timeout=90)
-            await status.delete()
-            log.info(
-                "video_note_sent user_id=%s processing_seconds=%.2f output_bytes=%s",
-                callback.from_user.id,
-                time.monotonic() - started_at,
-                note_path.stat().st_size,
+            from app.services.internet_archive import search_archive_audio
+            results = await search_archive_audio(query, "")
+            if not results:
+                await status.edit_text(
+                    "📭 Bu nom bo‘yicha ochiq litsenziyali audio topilmadi. "
+                    "Musiqa nomi bilan birga ijrochi nomini ham yozib ko‘ring."
+                )
+                return
+            await status.edit_text(
+                f"🎵 “{escape(query[:100])}” bo‘yicha topilgan ochiq litsenziyali audiolar:",
+                reply_markup=_archive_keyboard(results),
             )
-        except asyncio.TimeoutError:
-            log.exception("video_note_timeout user_id=%s", callback.from_user.id)
-            await status.edit_text("⏱ Yumaloq video tayyorlash yoki yuborish 90 soniyadan oshdi. Qisqaroq video bilan urinib ko‘ring.")
         except Exception:
-            log.exception("video_note_failed user_id=%s", callback.from_user.id)
-            await status.edit_text("❌ Dumaloq video tayyorlashda xatolik yuz berdi. Admin /logs orqali sababini ko‘rishi mumkin.")
-        finally:
-            if note_path:
-                note_path.unlink(missing_ok=True)
-
-    @router.message(F.text)
-    async def handle_link(message: Message) -> None:
-        url = extract_url(message.text or "")
-        if not url:
-            await message.answer("Iltimos, Instagram yoki Zikra video havolasini yuboring.")
-            return
-
-        user_id = message.from_user.id if message.from_user else 0
-        host = url.split("/")[2] if "://" in url else "unknown"
-        log.info("request_received user_id=%s url_host=%s", user_id, host)
-        status = await message.answer("🔎 Havola tekshirilmoqda…")
-        path: Path | None = None
-        source = "unknown"
-        try:
-            source = classify_url(url, settings)
-            log.info("source_detected source=%s user_id=%s", source, user_id)
-            if source == "zikra":
-                url = await resolve_zikra_video(url, settings)
-                log.info("zikra_url_resolved user_id=%s", user_id)
-
-            await status.edit_text("⬇️ Video yuklanmoqda…")
-            path = await download_video(url, settings, semaphore)
-            log.info("download_success source=%s user_id=%s size_bytes=%s", source, user_id, path.stat().st_size)
-            await status.edit_text("📤 Video Telegram'ga yuborilmoqda…")
-            await message.bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_VIDEO)
-
-            markup = _media_keyboard()
-            try:
-                await message.answer_video(
-                    FSInputFile(path),
-                    caption="✅ Video tayyor! Quyidagi tugmalardan foydalaning.",
-                    supports_streaming=True,
-                    reply_markup=markup,
-                )
-            except Exception:
-                log.info("Telegram video upload rejected; retrying as document.", exc_info=True)
-                await message.answer_document(
-                    FSInputFile(path),
-                    caption="✅ Video tayyor! Quyidagi tugmalardan foydalaning.",
-                    reply_markup=markup,
-                )
-
-            _cache_media((message.chat.id, user_id), path)
-            path = None  # The cache owns this file until its TTL expires.
-            await status.delete()
-            log.info("delivery_success source=%s user_id=%s", source, user_id)
-        except asyncio.TimeoutError:
-            log.warning("download_timeout source=%s user_id=%s", source, user_id)
-            await status.edit_text("⏱ Yuklash vaqti tugadi. Boshqa havola yoki keyinroq urinib ko‘ring.")
-        except ValueError as exc:
-            log.warning("request_rejected source=%s user_id=%s reason=%s", source, user_id, exc)
-            await status.edit_text(f"⚠️ {escape(str(exc))}")
-        except yt_dlp.utils.DownloadError:
-            log.exception("instagram_download_error source=%s user_id=%s", source, user_id)
-            await status.edit_text("❌ Instagram videoni bermadi yoki havola yopiq. Boshqa havolani sinab ko‘ring.")
-        except Exception:
-            log.exception("video_processing_failed source=%s user_id=%s", source, user_id)
-            await status.edit_text("❌ Videoni olishda xatolik. Admin /logs orqali sababini tekshirishi mumkin.")
-        finally:
-            if path:
-                path.unlink(missing_ok=True)
+            log.exception("music_search_failed query=%s", query[:80])
+            await status.edit_text("❌ Musiqa qidirishda xatolik. Keyinroq urinib ko‘ring.")
 
     return router
