@@ -23,14 +23,12 @@ def extract_url(text: str) -> str | None:
 
 def classify_url(url: str, settings: Settings) -> str:
     host = (urlparse(url).hostname or "").lower()
-    if host in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"}:
-        return "youtube"
     if host in {"instagram.com", "www.instagram.com", "m.instagram.com"}:
         return "instagram"
     supabase_host = (urlparse(settings.supabase_url).hostname or "").lower() if settings.supabase_url else ""
     if host in settings.allowed_zikra_hosts or (supabase_host and host == supabase_host):
         return "zikra"
-    raise ValueError("Bu havola qo‘llab-quvvatlanmaydi. Instagram, YouTube yoki Zikra havolasini yuboring.")
+    raise ValueError("Bu havola qo‘llab-quvvatlanmaydi. Instagram yoki Zikra havolasini yuboring.")
 
 
 def _download_sync(url: str, settings: Settings) -> Path:
@@ -45,18 +43,14 @@ def _download_sync(url: str, settings: Settings) -> Path:
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
-        "retries": 3,
-        "fragment_retries": 3,
+        "retries": 2,
+        "fragment_retries": 2,
         "concurrent_fragment_downloads": 4,
         "socket_timeout": 20,
         "max_filesize": settings.max_file_size_bytes,
         "restrictfilenames": True,
         "cachedir": False,
     }
-    if settings.ytdlp_cookies_file:
-        cookie_path = Path(settings.ytdlp_cookies_file)
-        if cookie_path.is_file():
-            opts["cookiefile"] = str(cookie_path)
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)

@@ -9,7 +9,7 @@ class TelegramLogBuffer(logging.Handler):
 
     SECRET_PATTERNS = [
         (re.compile(r"(?i)(bot\d{6,}:[A-Za-z0-9_-]{20,})"), "[BOT_TOKEN_REDACTED]"),
-        (re.compile(r"(?i)(SUPABASE_SERVICE_ROLE_KEY\s*[=:]\s*)\S+"), r"\1[REDACTED]"),
+        (re.compile(r"(?i)((?:SUPABASE_SERVICE_ROLE_KEY|AUDD_API_TOKEN)\s*[=:]\s*)\S+"), r"\1[REDACTED]"),
         (re.compile(r"(?i)([?&](?:token|signature|sig|x-amz-signature|key)=)[^&\s]+"), r"\1[REDACTED]"),
     ]
 
