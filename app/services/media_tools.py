@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import subprocess
 import uuid
 from pathlib import Path
@@ -7,8 +6,6 @@ from pathlib import Path
 import httpx
 
 from app.config import Settings
-
-log = logging.getLogger(__name__)
 
 
 def _run_ffmpeg(args: list[str]) -> None:
@@ -19,14 +16,16 @@ def _run_ffmpeg(args: list[str]) -> None:
 
 
 async def make_video_note(source: Path, settings: Settings) -> Path:
-    """Create Telegram-compatible square MP4 video note (up to 60 seconds)."""
+    """Create a square MP4 video note and preserve the original audio when present."""
     output = settings.download_dir / f"note-{uuid.uuid4().hex[:10]}.mp4"
     args = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(source), "-t", "60",
         "-vf", "scale=640:640:force_original_aspect_ratio=increase,crop=640:640,fps=30",
-        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "27",
-        "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output),
+        "-map", "0:v:0", "-map", "0:a?",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "27",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k", "-ac", "1",
+        "-movflags", "+faststart", str(output),
     ]
     await asyncio.to_thread(_run_ffmpeg, args)
     if not output.is_file() or output.stat().st_size > settings.max_file_size_bytes:
