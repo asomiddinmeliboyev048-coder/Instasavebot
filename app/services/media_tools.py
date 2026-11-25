@@ -3,13 +3,13 @@ import subprocess
 import uuid
 from pathlib import Path
 
-import httpx
+from shazamio import Shazam
 
 from app.config import Settings
 
 
 def _run_ffmpeg(args: list[str]) -> None:
-    result = subprocess.run(args, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(args, capture_output=True, text=True, timeout=75)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "FFmpeg error")[-1200:]
         raise RuntimeError(f"FFmpeg ishlamadi: {detail}")
@@ -20,13 +20,13 @@ async def make_video_note(source: Path, settings: Settings) -> Path:
     output = settings.download_dir / f"note-{uuid.uuid4().hex[:10]}.mp4"
     args = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-i", str(source), "-t", "60",
+        "-i", str(source), "-t", "30",
         # Smaller square + 24 fps + ultrafast preset greatly reduces CPU work
         # on Render while keeping the video note clear on a phone screen.
-        "-vf", "fps=24,scale=480:480:force_original_aspect_ratio=increase,crop=480:480",
+        "-vf", "fps=15,scale=320:320:force_original_aspect_ratio=increase:flags=fast_bilinear,crop=320:320",
         "-map", "0:v:0", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
-        "-threads", "0", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "32",
+        "-threads", "2", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "64k", "-ac", "1",
         "-movflags", "+faststart", str(output),
     ]
@@ -38,33 +38,24 @@ async def make_video_note(source: Path, settings: Settings) -> Path:
 
 
 async def identify_music(source: Path, settings: Settings) -> dict:
-    """Send a short audio sample to AudD. Requires AUDD_API_TOKEN."""
-    if not settings.audd_api_token:
-        raise ValueError("Musiqani aniqlash xizmati ulanmagan. Admin Render'ga AUDD_API_TOKEN qo‘shishi kerak.")
-
-    sample = settings.download_dir / f"sample-{uuid.uuid4().hex[:10]}.mp3"
+    """Recognize music with the free ShazamIO client; no API token required."""
+    sample = settings.download_dir / f"music-{uuid.uuid4().hex[:10]}.mp3"
     args = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-i", str(source), "-t", "18", "-vn", "-ac", "1",
-        "-ar", "44100", "-b:a", "128k", str(sample),
+        "-i", str(source), "-vn", "-t", "45", "-ac", "1",
+        "-ar", "44100", "-b:a", "96k", str(sample),
     ]
     try:
         await asyncio.to_thread(_run_ffmpeg, args)
-        timeout = httpx.Timeout(25.0, connect=8.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            with sample.open("rb") as audio:
-                response = await client.post(
-                    "https://api.audd.io/",
-                    data={"api_token": settings.audd_api_token, "return": "spotify,apple_music"},
-                    files={"file": ("sample.mp3", audio, "audio/mpeg")},
-                )
-            response.raise_for_status()
-            payload = response.json()
-        if payload.get("status") != "success":
-            raise RuntimeError(payload.get("error", {}).get("error_message", "Musiqa aniqlanmadi."))
-        result = payload.get("result")
-        if not result:
-            raise LookupError("Bu videoda aniq musiqa topilmadi.")
-        return result
+        if not sample.is_file() or sample.stat().st_size < 2048:
+            raise LookupError("Videoda aniqlash uchun yetarli audio topilmadi.")
+        async with Shazam() as shazam:
+            result = await asyncio.wait_for(shazam.recognize(str(sample)), timeout=35)
+        track = (result or {}).get("track") or {}
+        if not track:
+            raise LookupError("Bu videodagi musiqani topa olmadim. Boshqa videoni sinab ko‘ring.")
+        return {"title": track.get("title"), "artist": track.get("subtitle"), "url": track.get("url")}
+    except asyncio.TimeoutError as exc:
+        raise LookupError("Musiqa aniqlash vaqti tugadi. Yana urinib ko‘ring.") from exc
     finally:
         sample.unlink(missing_ok=True)
