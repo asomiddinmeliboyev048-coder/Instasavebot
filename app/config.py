@@ -13,9 +13,11 @@ class Settings(BaseSettings):
     admin_ids: str = ""
     max_file_size_mb: int = Field(default=49, ge=1, le=2000)
     download_dir: Path = Path("downloads")
-    max_concurrent_downloads: int = Field(default=2, ge=1, le=8)
+    max_concurrent_downloads: int = Field(default=3, ge=1, le=8)
     download_timeout_seconds: int = Field(default=180, ge=30, le=900)
-    ytdlp_cookies_file: str = ""
+
+    # Optional AudD API token for music recognition.
+    audd_api_token: str = ""
 
     supabase_url: str = ""
     supabase_service_role_key: str = ""
