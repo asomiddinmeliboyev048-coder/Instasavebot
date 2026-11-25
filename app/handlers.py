@@ -101,7 +101,7 @@ def build_router(
             f"👤 Admin ID: <code>{message.from_user.id}</code>\n"
             f"📦 Maksimal fayl: <b>{settings.max_file_size_mb} MB</b>\n"
             f"⚙️ Parallel yuklash: <b>{settings.max_concurrent_downloads}</b>\n"
-            f"🎵 Musiqa aniqlash: <b>{'Ulangan' if settings.audd_api_token else 'AUDD_API_TOKEN kerak'}</b>\n"
+            "🎵 Musiqa aniqlash: <b>Shazam (API tokensiz)</b>\n"
             f"🗄 Supabase: <b>{'Ulangan' if settings.supabase_url and settings.supabase_service_role_key else 'Sozlanmagan'}</b>\n\n"
             "Buyruqlar: /status, /logs, /logs 50, /clearlogs"
         )
@@ -178,12 +178,9 @@ def build_router(
                 album = result.get("album")
                 if album:
                     lines.append(f"💿 {escape(str(album))}")
-                spotify = (result.get("spotify") or {}).get("external_urls", {}).get("spotify")
-                apple = (result.get("apple_music") or {}).get("url")
-                if spotify:
-                    lines.append(f'🎧 <a href="{escape(str(spotify), quote=True)}">Spotify’da tinglash</a>')
-                elif apple:
-                    lines.append(f'🎧 <a href="{escape(str(apple), quote=True)}">Apple Music’da tinglash</a>')
+                track_url = result.get("url")
+                if track_url:
+                    lines.append(f'🎧 <a href="{escape(str(track_url), quote=True)}">Shazam’da ochish</a>')
                 await status.edit_text("\n".join(lines), disable_web_page_preview=True)
                 log.info("music_identified user_id=%s title=%s", callback.from_user.id, result.get("title"))
             except LookupError as exc:
@@ -203,9 +200,11 @@ def build_router(
         started_at = time.monotonic()
         try:
             note_path = await make_video_note(source, settings)
+            log.info("video_note_encoded user_id=%s encoding_seconds=%.2f output_bytes=%s",
+                     callback.from_user.id, time.monotonic() - started_at, note_path.stat().st_size)
             await status.edit_text("📤 Yumaloq video Telegram'ga yuborilmoqda…")
             await callback.message.bot.send_chat_action(callback.message.chat.id, ChatAction.UPLOAD_VIDEO)
-            await callback.message.answer_video_note(FSInputFile(note_path))
+            await asyncio.wait_for(callback.message.answer_video_note(FSInputFile(note_path)), timeout=90)
             await status.delete()
             log.info(
                 "video_note_sent user_id=%s processing_seconds=%.2f output_bytes=%s",
@@ -213,9 +212,12 @@ def build_router(
                 time.monotonic() - started_at,
                 note_path.stat().st_size,
             )
+        except asyncio.TimeoutError:
+            log.exception("video_note_timeout user_id=%s", callback.from_user.id)
+            await status.edit_text("⏱ Yumaloq video tayyorlash yoki yuborish 90 soniyadan oshdi. Qisqaroq video bilan urinib ko‘ring.")
         except Exception:
             log.exception("video_note_failed user_id=%s", callback.from_user.id)
-            await status.edit_text("❌ Dumaloq video tayyorlashda xatolik yuz berdi.")
+            await status.edit_text("❌ Dumaloq video tayyorlashda xatolik yuz berdi. Admin /logs orqali sababini ko‘rishi mumkin.")
         finally:
             if note_path:
                 note_path.unlink(missing_ok=True)
