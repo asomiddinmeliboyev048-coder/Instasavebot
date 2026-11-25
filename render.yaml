@@ -8,6 +8,10 @@ services:
     envVars:
       - key: BOT_TOKEN
         sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: YTDLP_COOKIES_FILE
+        sync: false
       - key: MAX_FILE_SIZE_MB
         value: "49"
       - key: LOG_LEVEL
