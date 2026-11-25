@@ -21,10 +21,13 @@ async def make_video_note(source: Path, settings: Settings) -> Path:
     args = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(source), "-t", "60",
-        "-vf", "scale=640:640:force_original_aspect_ratio=increase,crop=640:640,fps=30",
+        # Smaller square + 24 fps + ultrafast preset greatly reduces CPU work
+        # on Render while keeping the video note clear on a phone screen.
+        "-vf", "fps=24,scale=480:480:force_original_aspect_ratio=increase,crop=480:480",
         "-map", "0:v:0", "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "27",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k", "-ac", "1",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
+        "-threads", "0", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "64k", "-ac", "1",
         "-movflags", "+faststart", str(output),
     ]
     await asyncio.to_thread(_run_ffmpeg, args)
