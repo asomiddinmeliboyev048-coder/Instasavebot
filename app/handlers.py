@@ -29,11 +29,10 @@ MEDIA_CACHE: dict[tuple[int, int], tuple[Path, float]] = {}
 
 
 def _media_keyboard() -> InlineKeyboardMarkup:
+    # Keep actions on separate rows so labels stay readable on narrow phones.
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🎵 Musiqani aniqlash", callback_data="media:music"),
-            InlineKeyboardButton(text="⭕ Dumaloq video", callback_data="media:note"),
-        ]
+        [InlineKeyboardButton(text="🎵  Musiqani topish", callback_data="media:music")],
+        [InlineKeyboardButton(text="⭕  Yumaloq video qilish", callback_data="media:note")],
     ])
 
 
@@ -196,14 +195,24 @@ def build_router(
                 await status.edit_text("❌ Musiqani aniqlashda xatolik. Keyinroq urinib ko‘ring.")
             return
 
-        status = await callback.message.answer("⭕ Dumaloq video tayyorlanmoqda…")
+        status = await callback.message.answer(
+            "⭕ <b>Yumaloq video tayyorlanmoqda…</b>\n"
+            "🎞 Video 60 soniyagacha qisqartirilib, tezkor formatga o‘tkaziladi."
+        )
         note_path: Path | None = None
+        started_at = time.monotonic()
         try:
             note_path = await make_video_note(source, settings)
+            await status.edit_text("📤 Yumaloq video Telegram'ga yuborilmoqda…")
             await callback.message.bot.send_chat_action(callback.message.chat.id, ChatAction.UPLOAD_VIDEO)
             await callback.message.answer_video_note(FSInputFile(note_path))
             await status.delete()
-            log.info("video_note_sent user_id=%s", callback.from_user.id)
+            log.info(
+                "video_note_sent user_id=%s processing_seconds=%.2f output_bytes=%s",
+                callback.from_user.id,
+                time.monotonic() - started_at,
+                note_path.stat().st_size,
+            )
         except Exception:
             log.exception("video_note_failed user_id=%s", callback.from_user.id)
             await status.edit_text("❌ Dumaloq video tayyorlashda xatolik yuz berdi.")
