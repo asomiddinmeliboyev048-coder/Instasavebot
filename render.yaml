@@ -16,5 +16,16 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      # Zikra's /reels?start=<uuid> links resolve through public.reels.video_url.
+      - key: ZIKRA_VIDEO_TABLE
+        value: reels
+      - key: ZIKRA_VIDEO_ID_COLUMN
+        value: id
+      - key: ZIKRA_VIDEO_PATH_COLUMN
+        value: video_url
+      - key: ZIKRA_VIDEO_BUCKET_COLUMN
+        value: ""
       - key: ZIKRA_STORAGE_BUCKET
         value: videos
+      - key: ZIKRA_ALLOWED_HOSTS
+        value: zikra.uz,www.zikra.uz
