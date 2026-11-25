@@ -1,15 +1,17 @@
 import asyncio
 import logging
 import re
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
-import httpx
 from supabase import create_client
 
 from app.config import Settings
 
 log = logging.getLogger(__name__)
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+)
 
 
 def _safe_identifier(value: str) -> str:
@@ -34,12 +36,26 @@ def _storage_object_from_url(url: str) -> tuple[str, str] | None:
         return None
 
 
-async def resolve_zikra_video(url: str, settings: Settings) -> str:
-    """Return a downloadable URL for a Zikra video link.
+def _video_id_from_page_url(url: str) -> str | None:
+    """Extract the UUID used by Zikra's /reels?start=<reel UUID> share links."""
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    candidates = query.get("start", [])
+    if candidates and _UUID_RE.fullmatch(candidates[0]):
+        return candidates[0]
 
-    Direct public/signed URLs are passed through. Private Storage object paths can
-    be signed when SUPABASE_SERVICE_ROLE_KEY and a bucket are configured.
-    Optional table lookup is deliberately schema-configurable; no DB schema is assumed.
+    match = re.search(r"/(?:video|videos|watch)/([0-9a-fA-F-]{36})/?$", parsed.path)
+    if match and _UUID_RE.fullmatch(match.group(1)):
+        return match.group(1)
+    return None
+
+
+async def resolve_zikra_video(url: str, settings: Settings) -> str:
+    """Resolve a Zikra share URL to its actual downloadable media URL.
+
+    Zikra Reels are stored in public.reels(video_url), with the video itself
+    hosted on the platform's S3-compatible public storage. Other configured
+    Supabase Storage paths remain supported for legacy/private assets.
     """
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
@@ -54,27 +70,37 @@ async def resolve_zikra_video(url: str, settings: Settings) -> str:
         bucket, object_path = storage
         if not object_path:
             raise ValueError("Supabase Storage fayl manzili topilmadi.")
-        # Public and already signed links are directly usable.
-        mode = [p for p in parsed.path.split("/") if p]
-        mode = mode[mode.index("object") + 1] if "object" in mode else ""
+        parts = [p for p in parsed.path.split("/") if p]
+        mode = parts[parts.index("object") + 1] if "object" in parts else ""
         if mode in {"public", "sign"}:
             return url
         if not settings.supabase_url or not settings.supabase_service_role_key:
             raise ValueError("Bu Zikra videosi private. Supabase server kalitlari sozlanmagan.")
         return await asyncio.to_thread(_create_signed_url, settings, bucket, object_path)
 
-    # Optional DB lookup for platform routes such as /video/<id>.
-    if settings.zikra_video_table:
-        match = re.search(r"/(?:video|videos|watch)/([A-Za-z0-9_-]+)", parsed.path)
-        if match and settings.supabase_url and settings.supabase_service_role_key:
-            return await asyncio.to_thread(_lookup_video_url, settings, match.group(1))
+    # The live Zikra share format is /reels?start=<UUID>.
+    # Also retain support for /video/<UUID>, /videos/<UUID> and /watch/<UUID>.
+    video_id = _video_id_from_page_url(url)
+    if video_id:
+        if not settings.supabase_url or not settings.supabase_service_role_key:
+            raise ValueError(
+                "Zikra reels havolasini ochish uchun Render'da SUPABASE_URL "
+                "va SUPABASE_SERVICE_ROLE_KEY sozlanishi kerak."
+            )
+        if not settings.zikra_video_table:
+            raise ValueError(
+                "Zikra reels jadvali sozlanmagan. ZIKRA_VIDEO_TABLE=reels "
+                "va ZIKRA_VIDEO_PATH_COLUMN=video_url qiymatlarini kiriting."
+            )
+        return await asyncio.to_thread(_lookup_video_url, settings, video_id)
 
     # A Zikra URL that is itself a direct video file can be downloaded by yt-dlp.
     if parsed.path.lower().endswith((".mp4", ".mov", ".m4v", ".webm")):
         return url
+
     raise ValueError(
-        "Bu Zikra havolasidan video manzilini aniqlab bo‘lmadi. "
-        "Zikra video sahifasining URL formati yoki Supabase jadval sxemasi kerak bo‘ladi."
+        "Zikra havolasi tanildi, lekin video ID aniqlanmadi. "
+        "Reels ulashish havolasi /reels?start=<video-id> formatida bo‘lishi kerak."
     )
 
 
@@ -92,16 +118,26 @@ def _create_signed_url(settings: Settings, bucket: str, path: str) -> str:
 def _lookup_video_url(settings: Settings, video_id: str) -> str:
     table = _safe_identifier(settings.zikra_video_table)
     id_col = _safe_identifier(settings.zikra_video_id_column)
-    path_col = _safe_identifier(settings.zikra_video_path_column)
+    media_col = _safe_identifier(settings.zikra_video_path_column)
     client = create_client(settings.supabase_url, settings.supabase_service_role_key)
     query = client.table(table).select("*").eq(id_col, video_id).limit(1).execute()
     rows = query.data or []
     if not rows:
-        raise ValueError("Zikra videosi bazadan topilmadi yoki unga kirish ruxsati yo‘q.")
-    row = rows[0]
-    path = row.get(path_col)
+        raise ValueError(
+            "Zikra reeli bazadan topilmadi. Havola eskirgan yoki reel o‘chirilgan bo‘lishi mumkin."
+        )
+
+    media_value = rows[0].get(media_col)
+    if not isinstance(media_value, str) or not media_value.strip():
+        raise ValueError("Zikra bazasida video_url qiymati bo‘sh.")
+
+    # Zikra reels.video_url stores an absolute public S3 URL, not a Supabase
+    # Storage object path. Return it directly so yt-dlp downloads the real file.
+    if media_value.startswith(("https://", "http://")):
+        return media_value
+
     bucket_col = settings.zikra_video_bucket_column
-    bucket = row.get(_safe_identifier(bucket_col)) if bucket_col else settings.zikra_storage_bucket
-    if not path or not bucket:
-        raise ValueError("Zikra jadvalidan Storage bucket yoki fayl yo‘li topilmadi.")
-    return _create_signed_url(settings, bucket, path)
+    bucket = rows[0].get(_safe_identifier(bucket_col)) if bucket_col else settings.zikra_storage_bucket
+    if not bucket:
+        raise ValueError("Supabase Storage bucket nomi aniqlanmadi.")
+    return _create_signed_url(settings, bucket, media_value)
