@@ -25,7 +25,11 @@ def build_router(
     router = Router()
 
     def is_admin(message: Message) -> bool:
-        return bool(message.from_user and message.from_user.id in settings.admin_id_set)
+        return bool(
+            message.chat.type == "private"
+            and message.from_user
+            and message.from_user.id in settings.admin_id_set
+        )
 
     @router.message(CommandStart())
     async def start(message: Message) -> None:
