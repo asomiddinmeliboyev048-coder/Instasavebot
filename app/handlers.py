@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from html import escape
 from pathlib import Path
 
@@ -7,14 +8,49 @@ import yt_dlp
 from aiogram import F, Router
 from aiogram.enums import ChatAction
 from aiogram.filters import Command, CommandStart
-from aiogram.types import FSInputFile, Message
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from app.config import Settings
 from app.diagnostics import TelegramLogBuffer
 from app.services.downloader import classify_url, download_video, extract_url
+from app.services.media_tools import identify_music, make_video_note
 from app.services.zikra import resolve_zikra_video
 
 log = logging.getLogger(__name__)
+MEDIA_TTL_SECONDS = 20 * 60
+# Cache the last successfully downloaded media per user/chat for quick follow-up actions.
+MEDIA_CACHE: dict[tuple[int, int], tuple[Path, float]] = {}
+
+
+def _media_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🎵 Musiqani aniqlash", callback_data="media:music"),
+            InlineKeyboardButton(text="⭕ Dumaloq video", callback_data="media:note"),
+        ]
+    ])
+
+
+def _cache_media(key: tuple[int, int], path: Path) -> None:
+    previous = MEDIA_CACHE.get(key)
+    if previous and previous[0] != path:
+        previous[0].unlink(missing_ok=True)
+    MEDIA_CACHE[key] = (path, time.monotonic() + MEDIA_TTL_SECONDS)
+
+    async def expire() -> None:
+        await asyncio.sleep(MEDIA_TTL_SECONDS)
+        current = MEDIA_CACHE.get(key)
+        if current and current[0] == path and current[1] <= time.monotonic():
+            MEDIA_CACHE.pop(key, None)
+            path.unlink(missing_ok=True)
+
+    asyncio.create_task(expire())
 
 
 def build_router(
@@ -35,15 +71,16 @@ def build_router(
     async def start(message: Message) -> None:
         await message.answer(
             "Salom! 👋\n\n"
-            "Menga Instagram, YouTube yoki Zikra video havolasini yuboring. "
-            "Men videoni Telegram orqali qaytaraman.\n\n"
-            "Faqat o‘zingiz foydalanishga haqli bo‘lgan videolarni yuboring."
+            "Instagram yoki Zikra video havolasini yuboring. "
+            "Video tayyor bo‘lgach, musiqasini aniqlash yoki dumaloq video qilish mumkin.\n\n"
+            "Faqat foydalanishga haqli bo‘lgan videolaringizni yuboring."
         )
 
     @router.message(Command("help"))
     async def help_command(message: Message) -> None:
         await message.answer(
-            "Video havolasini yuboring. Qo‘llab-quvvatlanadi: Instagram, YouTube va Zikra Reels."
+            "Instagram yoki Zikra havolasini yuboring. "
+            "Video kelgach, 🎵 musiqani aniqlash yoki ⭕ dumaloq video tugmasini bosing."
         )
 
     @router.message(Command("myid"))
@@ -60,15 +97,12 @@ def build_router(
         if not is_admin(message):
             await message.answer("⛔ Bu buyruq faqat administrator uchun.")
             return
-        if not settings.admin_id_set:
-            await message.answer("⚙️ Render Environment'da ADMIN_IDS sozlanmagan.")
-            return
         await message.answer(
             "🛠 <b>Insta Save boshqaruv paneli</b>\n\n"
             f"👤 Admin ID: <code>{message.from_user.id}</code>\n"
             f"📦 Maksimal fayl: <b>{settings.max_file_size_mb} MB</b>\n"
             f"⚙️ Parallel yuklash: <b>{settings.max_concurrent_downloads}</b>\n"
-            f"🍪 YouTube cookies: <b>{'Sozlangan' if settings.ytdlp_cookies_file else 'Sozlanmagan'}</b>\n"
+            f"🎵 Musiqa aniqlash: <b>{'Ulangan' if settings.audd_api_token else 'AUDD_API_TOKEN kerak'}</b>\n"
             f"🗄 Supabase: <b>{'Ulangan' if settings.supabase_url and settings.supabase_service_role_key else 'Sozlanmagan'}</b>\n\n"
             "Buyruqlar: /status, /logs, /logs 50, /clearlogs"
         )
@@ -82,10 +116,11 @@ def build_router(
         await message.answer(
             "🟢 <b>Bot holati</b>\n"
             f"🤖 @{me.username}\n"
-            f"🧩 Zikra jadvali: <code>{settings.zikra_video_table}</code>\n"
-            f"🆔 ID ustuni: <code>{settings.zikra_video_id_column}</code>\n"
-            f"🎞 Video ustuni: <code>{settings.zikra_video_path_column}</code>\n"
-            f"🍪 YouTube cookies: {'✅' if settings.ytdlp_cookies_file and Path(settings.ytdlp_cookies_file).is_file() else '❌'}\n"
+            "📥 Manbalar: Instagram, Zikra\n"
+            f"🧩 Zikra jadvali: <code>{escape(settings.zikra_video_table)}</code>\n"
+            f"🆔 ID ustuni: <code>{escape(settings.zikra_video_id_column)}</code>\n"
+            f"🎞 Video ustuni: <code>{escape(settings.zikra_video_path_column)}</code>\n"
+            f"🎵 AudD: {'✅' if settings.audd_api_token else '❌'}\n"
             f"🔐 Adminlar: {len(settings.admin_id_set)}"
         )
 
@@ -106,7 +141,6 @@ def build_router(
         if not entries:
             await message.answer("Hozircha log yozuvlari yo‘q.")
             return
-        # Telegram message length limit; send newest entries in compact chunks.
         text = "📋 <b>Oxirgi loglar</b>\n<pre>" + escape("\n".join(entries)) + "</pre>"
         if len(text) > 3900:
             text = "📋 <b>Oxirgi loglar</b>\n<pre>" + escape("\n".join(entries[-12:])) + "</pre>"
@@ -121,15 +155,72 @@ def build_router(
             log_buffer.clear()
         await message.answer("🧹 Log xotirasi tozalandi.")
 
+    @router.callback_query(F.data.in_({"media:music", "media:note"}))
+    async def media_action(callback: CallbackQuery) -> None:
+        if not callback.message or not callback.from_user:
+            await callback.answer("Xabar topilmadi.", show_alert=True)
+            return
+        key = (callback.message.chat.id, callback.from_user.id)
+        cached = MEDIA_CACHE.get(key)
+        if not cached or not cached[0].is_file() or cached[1] <= time.monotonic():
+            MEDIA_CACHE.pop(key, None)
+            await callback.answer("Video muddati tugagan. Havolani qayta yuboring.", show_alert=True)
+            return
+
+        source = cached[0]
+        await callback.answer("⏳ Bajarilmoqda…")
+        if callback.data == "media:music":
+            status = await callback.message.answer("🎵 Videodagi musiqa aniqlanmoqda…")
+            try:
+                result = await identify_music(source, settings)
+                title = escape(str(result.get("title") or "Noma’lum"))
+                artist = escape(str(result.get("artist") or "Noma’lum ijrochi"))
+                lines = [f"🎵 <b>{title}</b>", f"👤 {artist}"]
+                album = result.get("album")
+                if album:
+                    lines.append(f"💿 {escape(str(album))}")
+                spotify = (result.get("spotify") or {}).get("external_urls", {}).get("spotify")
+                apple = (result.get("apple_music") or {}).get("url")
+                if spotify:
+                    lines.append(f'🎧 <a href="{escape(str(spotify), quote=True)}">Spotify’da tinglash</a>')
+                elif apple:
+                    lines.append(f'🎧 <a href="{escape(str(apple), quote=True)}">Apple Music’da tinglash</a>')
+                await status.edit_text("\n".join(lines), disable_web_page_preview=True)
+                log.info("music_identified user_id=%s title=%s", callback.from_user.id, result.get("title"))
+            except LookupError as exc:
+                await status.edit_text(f"🔎 {escape(str(exc))}")
+            except ValueError as exc:
+                await status.edit_text(f"⚠️ {escape(str(exc))}")
+            except Exception:
+                log.exception("music_identification_failed user_id=%s", callback.from_user.id)
+                await status.edit_text("❌ Musiqani aniqlashda xatolik. Keyinroq urinib ko‘ring.")
+            return
+
+        status = await callback.message.answer("⭕ Dumaloq video tayyorlanmoqda…")
+        note_path: Path | None = None
+        try:
+            note_path = await make_video_note(source, settings)
+            await callback.message.bot.send_chat_action(callback.message.chat.id, ChatAction.UPLOAD_VIDEO)
+            await callback.message.answer_video_note(FSInputFile(note_path))
+            await status.delete()
+            log.info("video_note_sent user_id=%s", callback.from_user.id)
+        except Exception:
+            log.exception("video_note_failed user_id=%s", callback.from_user.id)
+            await status.edit_text("❌ Dumaloq video tayyorlashda xatolik yuz berdi.")
+        finally:
+            if note_path:
+                note_path.unlink(missing_ok=True)
+
     @router.message(F.text)
     async def handle_link(message: Message) -> None:
         url = extract_url(message.text or "")
         if not url:
-            await message.answer("Iltimos, video havolasini yuboring.")
+            await message.answer("Iltimos, Instagram yoki Zikra video havolasini yuboring.")
             return
 
         user_id = message.from_user.id if message.from_user else 0
-        log.info("request_received user_id=%s url_host=%s", user_id, url.split("/")[2] if "://" in url else "unknown")
+        host = url.split("/")[2] if "://" in url else "unknown"
+        log.info("request_received user_id=%s url_host=%s", user_id, host)
         status = await message.answer("🔎 Havola tekshirilmoqda…")
         path: Path | None = None
         source = "unknown"
@@ -146,41 +237,38 @@ def build_router(
             await status.edit_text("📤 Video Telegram'ga yuborilmoqda…")
             await message.bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_VIDEO)
 
+            markup = _media_keyboard()
             try:
                 await message.answer_video(
                     FSInputFile(path),
-                    caption="✅ Video tayyor!",
+                    caption="✅ Video tayyor! Quyidagi tugmalardan foydalaning.",
                     supports_streaming=True,
+                    reply_markup=markup,
                 )
             except Exception:
                 log.info("Telegram video upload rejected; retrying as document.", exc_info=True)
-                await message.answer_document(FSInputFile(path), caption="✅ Video tayyor!")
+                await message.answer_document(
+                    FSInputFile(path),
+                    caption="✅ Video tayyor! Quyidagi tugmalardan foydalaning.",
+                    reply_markup=markup,
+                )
 
+            _cache_media((message.chat.id, user_id), path)
+            path = None  # The cache owns this file until its TTL expires.
             await status.delete()
             log.info("delivery_success source=%s user_id=%s", source, user_id)
         except asyncio.TimeoutError:
             log.warning("download_timeout source=%s user_id=%s", source, user_id)
-            await status.edit_text("⏱ Yuklash vaqti tugadi. Boshqa havolani yoki keyinroq urinib ko‘ring.")
+            await status.edit_text("⏱ Yuklash vaqti tugadi. Boshqa havola yoki keyinroq urinib ko‘ring.")
         except ValueError as exc:
             log.warning("request_rejected source=%s user_id=%s reason=%s", source, user_id, exc)
-            await status.edit_text(f"⚠️ {exc}")
-        except yt_dlp.utils.DownloadError as exc:
-            error_text = str(exc).lower()
-            log.exception("ytdlp_download_error source=%s user_id=%s", source, user_id)
-            if "sign in to confirm" in error_text or "not a bot" in error_text:
-                await status.edit_text(
-                    "⚠️ YouTube server so‘rovini vaqtincha chekladi. "
-                    "Admin /logs buyrug‘i orqali batafsil sababni ko‘rishi mumkin."
-                )
-            else:
-                await status.edit_text(
-                    "❌ Video manbasi yuklashga ruxsat bermadi yoki formatni topib bo‘lmadi."
-                )
+            await status.edit_text(f"⚠️ {escape(str(exc))}")
+        except yt_dlp.utils.DownloadError:
+            log.exception("instagram_download_error source=%s user_id=%s", source, user_id)
+            await status.edit_text("❌ Instagram videoni bermadi yoki havola yopiq. Boshqa havolani sinab ko‘ring.")
         except Exception:
             log.exception("video_processing_failed source=%s user_id=%s", source, user_id)
-            await status.edit_text(
-                "❌ Videoni olishda xatolik yuz berdi. Admin /logs orqali sababini tekshirishi mumkin."
-            )
+            await status.edit_text("❌ Videoni olishda xatolik. Admin /logs orqali sababini tekshirishi mumkin.")
         finally:
             if path:
                 path.unlink(missing_ok=True)
