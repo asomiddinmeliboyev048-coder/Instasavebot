@@ -10,17 +10,18 @@ services:
         sync: false
       - key: ADMIN_IDS
         sync: false
-      - key: YTDLP_COOKIES_FILE
-        sync: false
       - key: MAX_FILE_SIZE_MB
         value: "49"
+      - key: MAX_CONCURRENT_DOWNLOADS
+        value: "3"
       - key: LOG_LEVEL
         value: INFO
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
-      # Zikra's /reels?start=<uuid> links resolve through public.reels.video_url.
+      - key: AUDD_API_TOKEN
+        sync: false
       - key: ZIKRA_VIDEO_TABLE
         value: reels
       - key: ZIKRA_VIDEO_ID_COLUMN
