@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     supabase_url: str = ""
     supabase_service_role_key: str = ""
-    zikra_storage_bucket: str = ""
+    zikra_storage_bucket: str = "videos"
     zikra_allowed_hosts: str = "zikra.uz,www.zikra.uz"
     zikra_video_table: str = ""
     zikra_video_id_column: str = "id"
