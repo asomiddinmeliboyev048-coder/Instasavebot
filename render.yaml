@@ -17,4 +17,4 @@ services:
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: ZIKRA_STORAGE_BUCKET
-        sync: false
+        value: videos
