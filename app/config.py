@@ -16,9 +16,6 @@ class Settings(BaseSettings):
     max_concurrent_downloads: int = Field(default=3, ge=1, le=8)
     download_timeout_seconds: int = Field(default=180, ge=30, le=900)
 
-    # Optional AudD API token for music recognition.
-    audd_api_token: str = ""
-
     supabase_url: str = ""
     supabase_service_role_key: str = ""
     zikra_storage_bucket: str = "videos"
