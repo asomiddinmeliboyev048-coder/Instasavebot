@@ -42,6 +42,15 @@ def build_router(
             "Video havolasini yuboring. Qo‘llab-quvvatlanadi: Instagram, YouTube va Zikra Reels."
         )
 
+    @router.message(Command("myid"))
+    async def my_id_command(message: Message) -> None:
+        if message.from_user:
+            await message.answer(
+                f"🆔 Telegram ID: <code>{message.from_user.id}</code>\n"
+                "Admin panelini yoqish uchun Render Environment'da "
+                "ADMIN_IDS qiymatiga shu raqamni kiriting."
+            )
+
     @router.message(Command("admin"))
     async def admin_command(message: Message) -> None:
         if not is_admin(message):
