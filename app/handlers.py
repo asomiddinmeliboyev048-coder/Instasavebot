@@ -119,7 +119,7 @@ def build_router(
             f"🧩 Zikra jadvali: <code>{escape(settings.zikra_video_table)}</code>\n"
             f"🆔 ID ustuni: <code>{escape(settings.zikra_video_id_column)}</code>\n"
             f"🎞 Video ustuni: <code>{escape(settings.zikra_video_path_column)}</code>\n"
-            f"🎵 AudD: {'✅' if settings.audd_api_token else '❌'}\n"
+            "🎵 Musiqa: Shazam (API tokensiz)\n"
             f"🔐 Adminlar: {len(settings.admin_id_set)}"
         )
 
@@ -194,7 +194,7 @@ def build_router(
 
         status = await callback.message.answer(
             "⭕ <b>Yumaloq video tayyorlanmoqda…</b>\n"
-            "🎞 Video 60 soniyagacha qisqartirilib, tezkor formatga o‘tkaziladi."
+            "🎞 Video 30 soniyagacha qisqartirilib, tezkor formatga o‘tkaziladi."
         )
         note_path: Path | None = None
         started_at = time.monotonic()
