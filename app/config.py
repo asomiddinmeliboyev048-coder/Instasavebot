@@ -10,6 +10,7 @@ class Settings(BaseSettings):
 
     bot_token: str = Field(min_length=10)
     bot_username: str = ""
+    admin_ids: str = ""
     max_file_size_mb: int = Field(default=49, ge=1, le=2000)
     download_dir: Path = Path("downloads")
     max_concurrent_downloads: int = Field(default=2, ge=1, le=8)
@@ -20,9 +21,9 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     zikra_storage_bucket: str = "videos"
     zikra_allowed_hosts: str = "zikra.uz,www.zikra.uz"
-    zikra_video_table: str = ""
+    zikra_video_table: str = "reels"
     zikra_video_id_column: str = "id"
-    zikra_video_path_column: str = "storage_path"
+    zikra_video_path_column: str = "video_url"
     zikra_video_bucket_column: str = ""
 
     log_level: str = "INFO"
@@ -30,6 +31,15 @@ class Settings(BaseSettings):
     @property
     def allowed_zikra_hosts(self) -> set[str]:
         return {host.strip().lower() for host in self.zikra_allowed_hosts.split(",") if host.strip()}
+
+    @property
+    def admin_id_set(self) -> set[int]:
+        result: set[int] = set()
+        for value in self.admin_ids.split(","):
+            value = value.strip()
+            if value.isdigit():
+                result.add(int(value))
+        return result
 
     @property
     def max_file_size_bytes(self) -> int:
