@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from html import escape
 from pathlib import Path
 
 import yt_dlp
@@ -93,9 +94,9 @@ def build_router(
             await message.answer("Hozircha log yozuvlari yo‘q.")
             return
         # Telegram message length limit; send newest entries in compact chunks.
-        text = "📋 <b>Oxirgi loglar</b>\n<pre>" + "\n".join(entries) + "</pre>"
+        text = "📋 <b>Oxirgi loglar</b>\n<pre>" + escape("\n".join(entries)) + "</pre>"
         if len(text) > 3900:
-            text = "📋 <b>Oxirgi loglar</b>\n<pre>" + "\n".join(entries[-12:]) + "</pre>"
+            text = "📋 <b>Oxirgi loglar</b>\n<pre>" + escape("\n".join(entries[-12:])) + "</pre>"
         await message.answer(text)
 
     @router.message(Command("clearlogs"))
