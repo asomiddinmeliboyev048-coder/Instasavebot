@@ -2,7 +2,6 @@ import logging
 import re
 from collections import deque
 from datetime import datetime, timezone
-from threading import Lock
 
 
 class TelegramLogBuffer(logging.Handler):
@@ -16,7 +15,6 @@ class TelegramLogBuffer(logging.Handler):
     def __init__(self, max_records: int = 200):
         super().__init__(level=logging.INFO)
         self.records = deque(maxlen=max_records)
-        self.lock = Lock()
         self.setFormatter(logging.Formatter("%(levelname)s | %(name)s | %(message)s"))
 
     def emit(self, record: logging.LogRecord) -> None:
@@ -25,15 +23,20 @@ class TelegramLogBuffer(logging.Handler):
             for pattern, replacement in self.SECRET_PATTERNS:
                 message = pattern.sub(replacement, message)
             entry = f"{datetime.now(timezone.utc).astimezone().strftime('%H:%M:%S')} | {message}"
-            with self.lock:
-                self.records.append(entry)
+            self.records.append(entry)
         except Exception:
             self.handleError(record)
 
     def tail(self, count: int = 20) -> list[str]:
-        with self.lock:
+        self.acquire()
+        try:
             return list(self.records)[-max(1, min(count, 50)):]
+        finally:
+            self.release()
 
     def clear(self) -> None:
-        with self.lock:
+        self.acquire()
+        try:
             self.records.clear()
+        finally:
+            self.release()
